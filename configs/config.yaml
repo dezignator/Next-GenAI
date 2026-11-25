@@ -1,0 +1,458 @@
+# =============================================================================
+# Next-GenAI — Master Configuration
+# Reference: Ali, B., & Chen, G. (2024). Next-generation AI for advanced threat
+# detection and security enhancement in DNS over HTTPS. JNCA, Elsevier.
+# =============================================================================
+# Usage:
+#   python scripts/train.py --config configs/config.yaml
+#   python scripts/run_pipeline.py --config configs/config.yaml
+# Overrides: any key can be overridden via CLI (--set training.epochs=100)
+# =============================================================================
+
+project:
+  name: "Next-GenAI"
+  version: "0.1.0"
+  paper_doi: "10.1016/j.jnca.2024.xxxxx"     # ← replace with final DOI on publication
+  authors: ["Basharat Ali", "Guihai Chen"]
+  institution: "State Key Laboratory of Novel Software Technology, Nanjing University"
+  seed: 42
+  deterministic: true                          # torch.use_deterministic_algorithms(True)
+  device: "cuda"                               # "cuda" | "cpu" | "mps"
+  num_workers: 8
+
+
+# =============================================================================
+# 1. DATA ACQUISITION & PREPROCESSING  (Paper Sec. 3.1)
+# =============================================================================
+data:
+  dataset_name: "doh_real_world_2022"          # Abstract + Sec. 3.1
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  synthetic_dir: "data/synthetic"
+
+  # ---- Train/Val/Test split (stratified) ----
+  split:
+    train_ratio: 0.70
+    val_ratio:   0.15
+    test_ratio:  0.15
+    stratify_on: "label"
+    random_state: 42
+
+  # ---- Feature engineering (Paper Sec. 3.1, bullet points) ----
+  features:
+    dns_query_patterns:
+      enabled: true
+      metrics:
+        - "query_entropy"                       # Sec. 3.1
+        - "query_frequency"                     # Sec. 3.1
+        - "domain_length_distribution"          # Sec. 3.1
+        - "subdomain_count"
+        - "tld_entropy"
+        - "nxdomain_rate"
+
+    tls_metadata:
+      enabled: true
+      metrics:
+        - "cipher_suite_usage"                  # Sec. 3.1
+        - "session_resumption_rate"             # Sec. 3.1
+        - "certificate_issuer"
+        - "certificate_validity_days"
+        - "sni_mismatch"
+        - "alpn_protocol"                       # h2, h3, http/1.1
+
+    doh_http_headers:
+      enabled: true
+      metrics:
+        - "content_type_mismatch"               # Sec. 3.1
+        - "http_request_pattern"                # Sec. 3.1
+        - "response_latency_anomaly"            # Sec. 3.1
+        - "user_agent_entropy"
+        - "accept_header_mismatch"
+        - "request_method_anomaly"              # GET vs POST
+
+    temporal:
+      enabled: true
+      metrics:
+        - "query_timing"                        # Sec. 3.1
+        - "inter_arrival_time"                  # Sec. 3.1
+        - "burstiness"
+        - "periodicity_score"
+        - "hour_of_day_entropy"
+
+  # ---- Dimensionality reduction (Paper Sec. 3.1) ----
+  reduction:
+    pca:
+      enabled: true
+      n_components: 64
+      whiten: true
+    tsne:
+      enabled: true
+      n_components: 2
+      perplexity: 30
+      n_iter: 1000
+      only_for_visualization: true             # t-SNE not used as feature input
+
+  # ---- Class imbalance handling ----
+  imbalance:
+    strategy: "smote"                          # "none" | "smote" | "class_weight"
+    smote_k_neighbors: 5
+    smote_sampling_strategy: 0.5
+
+  # ---- Augmentation ----
+  augmentation:
+    gaussian_noise_std: 0.01
+    time_warp: false
+    jitter: 0.005
+
+
+# =============================================================================
+# 2. ADVERSARIAL THREAT MODELING  (Paper Sec. 3.2, Eq. 2 & 3)
+# =============================================================================
+adversarial:
+  enabled: true
+  evasion_threshold_epsilon: 0.01              # Eq. (3): ∇Ψ(x)·δΨ(x) > ε
+  adversarial_training_ratio: 0.30             # 30% adversarial samples per batch
+
+  # ---- Attack modules (Sec. 3.2) ----
+  attacks:
+    mutation_fuzzing:
+      enabled: true
+      samples: 5000
+      mutation_rate: 0.05
+      operators:
+        - "bit_flip"
+        - "byte_insertion"
+        - "header_reorder"
+        - "content_length_tamper"
+        - "random_subdomain_append"
+        - "ttl_manipulation"
+
+    polymorphic_malware:
+      enabled: true
+      samples: 5000
+      mutation_interval_seconds: 60             # self-modifying payload
+      payload_size_range_kb: [1, 50]
+      encryption_layers: [1, 3]                 # multi-layer obfuscation
+
+    tls_hijack:
+      enabled: true
+      samples: 3000
+      mitm_cert_swap: true                      # Sec. 3.2
+      session_resumption_forge: true
+      cipher_downgrade: true                    # TLS 1.3 → 1.2
+      sni_rewrite_probability: 0.4
+
+    dns_tunneling:
+      enabled: true
+      samples: 3000
+      tunneling_techniques:
+        - "iodine"                              # Sec. 3.2
+        - "dnscat2"
+        - "dns2tcp"
+        - "custom_base32"
+      max_payload_bytes_per_query: 220
+      beacon_interval_seconds: [5, 60]
+
+    command_and_control:                      # Sec. 1, 2.4
+      enabled: true
+      samples: 2000
+      c2_protocols:
+        - "dns_over_https_txt"
+        - "dns_txt_covert"
+
+  # ---- KL-divergence dataset-bias test (Table 1, row 4) ----
+  distributional_bias:
+    enabled: true
+    kl_divergence_threshold: 0.15
+    reference_distribution: "train"
+    compare_against: ["val", "test", "synthetic"]
+
+
+# =============================================================================
+# 3. CAPSULE NETWORK  (Paper Sec. 3.3, Eq. 4, 5, 6, 7, 8)
+# =============================================================================
+capsnet:
+  # Input: flattened engineered features
+  input_dim: 256                               # matches PCA(64) + raw features
+
+  # Primary capsules (Eq. 4: capsule layer C^(l))
+  primary_capsules:
+    num_capsules: 32
+    capsule_dim: 8                             # u_i ∈ ℝ^8
+
+  # Digit-class capsules (Eq. 8: squash output v_j)
+  num_classes: 2                               # benign / malicious
+  class_capsule_dim: 16
+
+  # ---- Dynamic routing (Eq. 6) ----
+  routing:
+    num_iterations: 3                          # coupling coefficients c_ij
+    routing_type: "ricci_flow"                 # Eq. (4) — Ricci-flow routing
+    beta: 0.5                                  # Eq. (4) diffusion coefficient
+    temperature: 1.0                           # α_ij softmax temperature (Eq. 5)
+
+  # ---- Margin loss (Eq. 7) ----
+  margin_loss:
+    m_plus: 0.9                                # Eq. (7) m⁺
+    m_minus: 0.1                               # Eq. (7) m⁻
+    lambda_: 0.5                               # Eq. (7) λ for absent class
+    reduction: "mean"
+
+  # ---- Squash (Eq. 8) ----
+  squash:
+    eps: 1e-8
+
+  # ---- Training ----
+  dropout: 0.2
+  batch_norm: true
+
+
+# =============================================================================
+# 4. GRAPH TRANSFORMER  (Paper Sec. 3.4, Eq. 9–14)
+# =============================================================================
+graph_transformer:
+  # ---- Graph construction (Eq. 11–12) ----
+  graph:
+    node_features: "doh_query_embedding"        # h_i in Eq. 11
+    edge_construction: "knn"                    # "knn" | "cosine_threshold" | "dns_cooccurrence"
+    k_neighbors: 10
+    edge_threshold: 0.6
+    max_nodes_per_graph: 5000
+
+  # ---- Transformer backbone (Eq. 9, 11, 12) ----
+  model:
+    d_model: 128
+    num_heads: 8                                # Eq. (9) d_k = d_model / num_heads
+    num_layers: 4
+    dim_feedforward: 512
+    dropout: 0.1
+    activation: "gelu"                          # Eq. (12) σ ∈ {ReLU, GELU}
+    layer_norm_eps: 1e-6
+    max_seq_len: 512
+
+  # ---- Sheaf theory (Eq. 13, 14) ----
+  sheaf:
+    enabled: true
+    stalk_dim: 16                               # F(v) : G → ℝ
+    laplacian_reg: 0.1                          # λ in Eq. (14)
+    holonomy_tracking: true                     # Sec. 3.4.4
+
+  # ---- Anomaly scoring (Eq. 10) ----
+  anomaly_score:
+    metric: "frobenius_norm"                    # Eq. (10) ‖·‖_F
+    threshold_method: "percentile"
+    threshold_percentile: 95
+
+
+# =============================================================================
+# 5. CONTRASTIVE SELF-SUPERVISED LEARNING  (Paper Sec. 3.5, Eq. 15)
+# =============================================================================
+cssl:
+  enabled: true
+  temperature: 0.07                             # Eq. (15) τ
+  projection_dim: 128
+  projection_hidden_dim: 256
+
+  # ---- Positive / negative sampling ----
+  positive_pairs:
+    augmentations:
+      - "gaussian_noise"
+      - "feature_dropout"
+      - "time_shift"
+      - "domain_synonym_replace"
+      - "tls_cipher_perturb"
+    num_positives: 2
+
+  negatives:
+    strategy: "in_batch"                        # SimCLR-style
+    memory_bank_size: 4096                      # MoCo fallback
+    momentum: 0.999                             # MoCo momentum
+
+  # ---- Pre-training ----
+  pretrain:
+    epochs: 100
+    batch_size: 512
+    learning_rate: 3.0e-4
+    weight_decay: 1.0e-4
+    warmup_epochs: 10
+    optimizer: "adamw"
+
+
+# =============================================================================
+# 6. HYBRID ENSEMBLE  (Paper Sec. 1, Abstract)
+# =============================================================================
+ensemble:
+  strategy: "weighted_average"                  # "weighted_average" | "stacking" | "attention_fusion"
+  weights:                                      # reflect Fig. 1 accuracy
+    capsnet: 0.45                               # 99.1% accuracy
+    graph_transformer: 0.40                     # 98.8% recall
+    cssl: 0.15                                  # 0.992 AUC
+  fusion_layer:
+    enabled: true
+    hidden_dim: 64
+    dropout: 0.1
+  threshold: 0.5                                # probability ≥ threshold ⇒ malicious
+
+
+# =============================================================================
+# 7. TRAINING  (Generic loop)
+# =============================================================================
+training:
+  epochs: 50
+  batch_size: 256
+  grad_accumulation_steps: 1
+  mixed_precision: true                         # torch.cuda.amp
+  gradient_clip_norm: 1.0
+  early_stopping:
+    enabled: true
+    patience: 8
+    metric: "val_loss"
+    mode: "min"
+  checkpoint:
+    dir: "checkpoints"
+    save_top_k: 3
+    monitor: "val_auc"
+    mode: "max"
+  optimizer:
+    name: "adamw"
+    lr: 1.0e-3
+    weight_decay: 1.0e-2
+    betas: [0.9, 0.999]
+  scheduler:
+    name: "cosine_warmup"
+    warmup_epochs: 3
+    min_lr: 1.0e-6
+
+
+# =============================================================================
+# 8. EVALUATION
+# =============================================================================
+evaluation:
+  metrics:
+    - "accuracy"                                # target 99.1% (CapsNet, Abstract)
+    - "precision"
+    - "recall"                                  # target 98.8% (Graph TF)
+    - "f1"
+    - "roc_auc"                                 # target 0.992 (CSSL)
+    - "pr_auc"
+    - "fpr"                                     # target 0.007 (Fig. 1)
+    - "tpr"                                     # target 0.991 (Fig. 1)
+    - "mcc"
+    - "balanced_accuracy"
+  per_class: true
+  confusion_matrix: true
+  report_path: "results/evaluation_report.json"
+  figures:
+    - "roc_curve"
+    - "pr_curve"
+    - "confusion_matrix"
+    - "calibration_curve"
+
+
+# =============================================================================
+# 9. STREAMING PIPELINE  (Paper Sec. 1, 2.1, Table 1)
+# =============================================================================
+streaming:
+  enabled: true
+
+  # ---- Kafka ----
+  kafka:
+    bootstrap_servers: ["localhost:9092"]
+    topics:
+      input: "doh-traffic-raw"
+      alerts: "doh-alerts"
+      anomalies: "doh-anomalies"
+      dead_letter: "doh-dlq"
+    consumer_group: "nextgenai-doh-consumer"
+    auto_offset_reset: "latest"
+    max_poll_records: 500
+    session_timeout_ms: 30000
+    security_protocol: "SASL_SSL"
+    sasl_mechanism: "SCRAM-SHA-512"
+
+  # ---- Flink ----
+  flink:
+    parallelism: 4                              # match Kafka partitions
+    checkpoint_interval_ms: 10000
+    checkpoint_dir: "flink-checkpoints"
+    savepoint_dir: "flink-savepoints"
+    watermark_delay_seconds: 2
+    window_size_seconds: 10
+    window_slide_seconds: 5                     # sliding window
+    state_backend: "rocksdb"
+    restart_strategy: "exponential_delay"
+    restart_attempts: 3
+
+  # ---- Performance targets (Table 1, Fig. 1) ----
+  targets:
+    throughput_events_per_sec: 65000            # Fig. 1
+    max_inference_latency_ms: 48                # Fig. 1 / Table 1
+    end_to_end_latency_ms: 50                   # Sec. 1
+    backpressure_alert_ms: 200                  # Sec. 1 batch comparison
+
+
+# =============================================================================
+# 10. TRUSTED EXECUTION ENVIRONMENT  (Paper Sec. 2.3, 3.7)
+# =============================================================================
+tee:
+  enabled: true
+  backend: "sgx"                                # "sgx" | "trustzone" | "simulation"
+  enclave:
+    binary_path: "tee_artifacts/enclave.signed.so"
+    heap_size_mb: 256
+    stack_size_kb: 1024
+    debug: false                                # NEVER true in production
+  attestation:
+    enabled: true
+    provider: "intel_pcs"                       # "intel_pcs" | "azure" | "local"
+    verify_remote: true
+    mrenclave_check: true
+  sealed_data:
+    dir: "sealed_data"
+    encryption: "aes-gcm-256"
+
+
+# =============================================================================
+# 11. EXPLAINABILITY  (Paper Sec. 3.6, Eq. 16)
+# =============================================================================
+explainability:
+  shap:
+    enabled: true
+    explainer: "kernel"                         # "kernel" | "deep" | "tree" | "gradient"
+    background_samples: 1000
+    num_features_to_show: 10
+    equation_reference: "Eq. (16)"              # φ_i = Σ ... [f(S∪{i}) - f(S)]
+    shapley_sampling: 200
+
+  lime:
+    enabled: true
+    num_samples: 5000
+    num_features: 10
+    discretizer: "quartile"
+
+  visualization:
+    dashboard: "streamlit"
+    port: 8501
+    max_alerts_per_view: 100
+
+
+# =============================================================================
+# 12. LOGGING
+# =============================================================================
+logging:
+  level: "INFO"                                 # DEBUG | INFO | WARNING | ERROR
+  format: "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}"
+  dir: "logs"
+  rotation_mb: 100
+  retention_days: 30
+  console: true
+
+
+# =============================================================================
+# 13. REPRODUCIBILITY
+# =============================================================================
+reproducibility:
+  deterministic_algorithms: true
+  benchmark_cudnn: false
+  seed_everything: true
+  log_env_snapshot: true                        # dumps pip freeze + CUDA info to logs/
