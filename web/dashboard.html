@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Next-GenAI | DoH Threat Intelligence</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1>🛡️ Next-GenAI: DoH Threat Center</h1>
+        <div id="status-badge">System: <span class="online">Online</span></div>
+    </header>
+
+    <main>
+        <section class="metrics">
+            <div class="card">
+                <h3>Total Queries Scanned</h3>
+                <p id="total-scans">65,432</p>
+            </div>
+            <div class="card alert">
+                <h3>Malicious Detected</h3>
+                <p id="malicious-count">142</p>
+            </div>
+            <div class="card">
+                <h3>Pipeline Latency</h3>
+                <p id="latency">42 ms</p>
+            </div>
+        </section>
+
+        <section class="alerts-table">
+            <h2>Recent Threat Alerts (SHAP Explained)</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Domain</th>
+                        <th>Attack Type</th>
+                        <th>Confidence</th>
+                        <th>Top SHAP Feature</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="alert-body">
+                    <!-- Populated by JavaScript -->
+                </tbody>
+            </table>
+        </section>
+    </main>
+
+    <script src="dashboard.js"></script>
+</body>
+</html>
