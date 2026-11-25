@@ -1,0 +1,34 @@
+# =============================================================================
+# GitHub Linguist Overrides - Next-GenAI
+# =============================================================================
+
+# 1. Dockerfiles
+# Tells GitHub to explicitly count Dockerfiles as a language called "Dockerfile"
+docker/**/* linguist-detectable=true
+Dockerfile linguist-language=Dockerfile
+
+# 2. YAML Configuration (Kafka/Flink/Docker-compose)
+# Ensures your .yml and .yaml files show up in the language bar
+*.yml linguist-detectable=true
+*.yaml linguist-detectable=true
+
+# 3. Jupyter Notebooks
+# By default, GitHub counts .ipynb as a "Jupyter Notebook" language. 
+# If you want the code inside to count as Python instead, uncomment the line below:
+# *.ipynb linguist-language=Python
+*.ipynb linguist-detectable=true
+
+# 4. Shell Scripts
+# (If you have any .sh files for automation)
+*.sh linguist-detectable=true
+
+# 5. HTML / CSS / JavaScript
+# (If you have any frontend dashboard files, like in your Streamlit app)
+*.html linguist-detectable=true
+*.css linguist-detectable=true
+*.js linguist-detectable=true
+
+# 6. Documentation & Markdown
+# By default, GitHub ignores markdown files from language stats. 
+# If you want your huge docs/ folder to count, uncomment this:
+# *.md linguist-detectable=true
